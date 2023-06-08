@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gocql/gocql"
 	redis "github.com/redis/go-redis/v9"
 	kafka "github.com/segmentio/kafka-go"
 )
@@ -36,6 +37,7 @@ var (
 var (
 	kafkaWriter *kafka.Writer
 	redisClient *redis.Client
+	cqlSession  *gocql.Session
 )
 
 type Post struct {
@@ -46,6 +48,13 @@ type Post struct {
 }
 
 func init() {
+	cluster := gocql.NewCluster("127.0.0.1")
+	cluster.Keyspace = "user_posts"
+	var err error
+	cqlSession, err = cluster.CreateSession()
+	if err != nil {
+		panic(err)
+	}
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     redisAddr,
 		Password: redisPassword,
@@ -57,6 +66,7 @@ func init() {
 	redisClient = rdb
 }
 func main() {
+	defer cqlSession.Close()
 
 	r := gin.Default()
 	_, err := createTopic("user_posts", 0, 0)
@@ -71,13 +81,19 @@ func main() {
 		handleRead(c)
 	})
 
+	r.POST("/addpoststofeed", func(c *gin.Context) {
+		handleAddUserPostsToFeed(c)
+	})
+
+	r.GET("/feed", func(c *gin.Context) {
+		handleFeed(c)
+	})
+
 	go func() {
 		if err := r.Run(":8081"); err != nil {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
-
-	log.Println("Server started on port 8080")
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
@@ -86,6 +102,47 @@ func main() {
 	log.Println("Shutting down server...")
 
 	log.Println("Server shutdown complete")
+}
+
+type FollowFeedPayload struct {
+	Id       int
+	Follower int
+}
+
+func handleFeed(c *gin.Context) {
+
+}
+
+func handleAddUserPostsToFeed(c *gin.Context) {
+	// select all from cassandra
+	// add posts to user feed as sorted set
+	var followedUser FollowFeedPayload
+	if err := c.BindJSON(&followedUser); err != nil {
+		fmt.Println(err)
+	}
+	query := cqlSession.Query("SELECT post_id, created_at FROM posts WHERE user_id = ? AND created_at <= ?", followedUser.Id, time.Now())
+
+	iter := query.Iter()
+	var postId string
+	var created_at time.Time
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// exists, err := redisClient.ZScore(ctx).Result()
+	feedKey := fmt.Sprintf("feed:%d", followedUser.Follower)
+	fmt.Println(feedKey)
+	for iter.Scan(&postId, &created_at) {
+		// fmt.Println(postId, created_at)
+		redisClient.ZAdd(ctx, feedKey, redis.Z{
+			Score:  float64(created_at.Unix()),
+			Member: postId,
+		})
+	}
+
+	// Check for any errors during iteration
+	if err := iter.Close(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 type Payload struct {
@@ -106,7 +163,6 @@ func handleRead(c *gin.Context) {
 	readKafka("user_posts", []int{1})
 }
 
-// createTopic creates a Kafka topic with the given topic name, partition count, and replication factor.
 func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Conn, error) {
 	// Create an admin client
 	conn, err := kafka.DialLeader(context.Background(), "tcp", "localhost:9092", topic, partitions)
@@ -146,28 +202,6 @@ func postToKafka(userID int, content string, topic string) error {
 	log.Printf("Message posted to Kafka successfully")
 	return nil
 }
-
-// func readKafka(topic string) {
-// 	r := kafka.NewReader(kafka.ReaderConfig{
-// 		Brokers:   []string{"localhost:9092", "localhost:9093", "localhost:9094"},
-// 		Topic:     topic,
-// 		Partition: 0,
-// 		MaxBytes:  10e6,
-// 	})
-// 	r.SetOffset(42)
-
-// 	for {
-// 		m, err := r.ReadMessage(context.Background())
-// 		if err != nil {
-// 			break
-// 		}
-// 		fmt.Printf("message at offset %d: %s = %s\n", m.Offset, string(m.Key), string(m.Value))
-// 	}
-
-//		if err := r.Close(); err != nil {
-//			log.Fatal("failed to close reader:", err)
-//		}
-//	}
 
 func readKafka(topic string, following []int) {
 	brokers := []string{"localhost:9092"}
