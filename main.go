@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -85,7 +86,7 @@ func main() {
 		handleAddUserPostsToFeed(c)
 	})
 
-	r.GET("/feed", func(c *gin.Context) {
+	r.GET("/feed/:pageId", func(c *gin.Context) {
 		handleFeed(c)
 	})
 
@@ -109,8 +110,49 @@ type FollowFeedPayload struct {
 	Follower int
 }
 
-func handleFeed(c *gin.Context) {
+type FeedGetterPayload struct {
+	Id int
+}
 
+func handleFeed(c *gin.Context) {
+	num, err := getFeedPages(0)
+	if err != nil {
+		fmt.Println(err)
+	}
+	page_num, err := strconv.Atoi(c.Param("pageId"))
+	if err != nil {
+		fmt.Println(err)
+	}
+	pageSize := 5
+	fmt.Println(fmt.Sprintf("THERE ARE %d pages", int(math.Ceil(float64(num))/float64(pageSize))))
+	end := page_num * pageSize
+	start := end - pageSize
+	var user FeedGetterPayload
+	if err := c.BindJSON(&user); err != nil {
+		fmt.Println(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	postIDs, err := redisClient.ZRevRange(ctx, fmt.Sprintf("feed:%d", user.Id), int64(start), int64(end-1)).Result()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Process the retrieved post IDs (e.g., fetch post details from another data source)
+	for _, postID := range postIDs {
+		// Process each post ID
+		fmt.Println("Post ID:", postID)
+	}
+}
+func getFeedPages(userId int) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	totalPosts, err := redisClient.ZCard(ctx, fmt.Sprintf("feed:%d", userId)).Result()
+	if err != nil {
+		fmt.Println("Failed to get the total number of posts:", err)
+		return 0, fmt.Errorf("failed to get the total number of posts: %w", err)
+	}
+	return totalPosts, nil
 }
 
 func handleAddUserPostsToFeed(c *gin.Context) {
@@ -128,11 +170,9 @@ func handleAddUserPostsToFeed(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	// exists, err := redisClient.ZScore(ctx).Result()
 	feedKey := fmt.Sprintf("feed:%d", followedUser.Follower)
 	fmt.Println(feedKey)
 	for iter.Scan(&postId, &created_at) {
-		// fmt.Println(postId, created_at)
 		redisClient.ZAdd(ctx, feedKey, redis.Z{
 			Score:  float64(created_at.Unix()),
 			Member: postId,
