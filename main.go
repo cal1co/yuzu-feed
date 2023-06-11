@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"math"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 	redis "github.com/redis/go-redis/v9"
 	kafka "github.com/segmentio/kafka-go"
 )
@@ -66,20 +69,37 @@ func init() {
 	}
 	redisClient = rdb
 }
+
+func loadEnv() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+}
+
 func main() {
 	defer cqlSession.Close()
 
 	r := gin.Default()
+
 	_, err := createTopic("user_posts", 0, 0)
 	if err != nil {
 		fmt.Println(err)
 	}
+
+	loadEnv()
+	list, err := getFollowing(28)
+	if err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println("FOLLOW LIST", list)
+
 	r.POST("/", func(c *gin.Context) {
 		handlePost(c)
 	})
 
 	r.GET("/", func(c *gin.Context) {
-		handleRead(c)
+		handleRead(c, list)
 	})
 
 	r.POST("/addpoststofeed", func(c *gin.Context) {
@@ -199,8 +219,8 @@ func handlePost(c *gin.Context) {
 	postToKafka(payload.User, payload.Post_content, "user_posts")
 }
 
-func handleRead(c *gin.Context) {
-	readKafka("user_posts", []int{1})
+func handleRead(c *gin.Context, list map[int]int) {
+	readKafka("user_posts", list)
 }
 
 func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Conn, error) {
@@ -243,7 +263,7 @@ func postToKafka(userID int, content string, topic string) error {
 	return nil
 }
 
-func readKafka(topic string, following []int) {
+func readKafka(topic string, following map[int]int) {
 	brokers := []string{"localhost:9092"}
 	config := kafka.ReaderConfig{
 		// GroupID:         """,
@@ -277,14 +297,52 @@ func readKafka(topic string, following []int) {
 					log.Println("Error reading message:", err)
 					continue
 				}
-				fmt.Println(m)
-				// userID := extractUserIDFromMessage(m)
-				// if isFollowing(userID, following) {
-				// processMessage(m)
-				// }
+				userID, err := strconv.Atoi(string(m.Key))
+				if err != nil {
+					fmt.Println(err)
+				}
+				if _, exists := following[userID]; exists {
+					processMessage(m)
+				}
 			}
 		}
 	}()
 
 	wg.Wait()
+}
+
+func processMessage(m kafka.Message) {
+	fmt.Println("PROCESSING MESSAGE", m)
+}
+
+func getFollowing(userID int) (map[int]int, error) {
+	db, err := sql.Open("postgres", os.Getenv("DB_URL"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to the database: %v", err)
+	}
+	defer db.Close()
+
+	query := "SELECT following_id FROM followers WHERE follower_id = $1"
+
+	rows, err := db.Query(query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute the query: %v", err)
+	}
+	defer rows.Close()
+
+	users := make(map[int]int)
+	for rows.Next() {
+		var followingID int
+		err := rows.Scan(&followingID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan row: %v", err)
+		}
+		users[followingID] = followingID
+		fmt.Println(users)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error occurred during iteration: %v", err)
+	}
+	return users, nil
 }
