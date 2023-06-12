@@ -15,20 +15,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
+	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	redis "github.com/redis/go-redis/v9"
 	kafka "github.com/segmentio/kafka-go"
 )
-
-// POST:
-//    user posts to a topic
-// FEED:
-//    user selects posts from relevant topics
-//    adds posts to feed
-//    returns paginated feed (~20 posts)
-//    posts are stored simply as id's to deal with deleted posts (subject to change this feature)
-//    "online" users get posts in real time or from polling every once-in-a-while so they recieve updates for recents posts
 
 var (
 	kafkaBroker   = "localhost:9092"
@@ -38,10 +30,16 @@ var (
 	redisDB       = 0
 )
 
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
 var (
 	kafkaWriter *kafka.Writer
 	redisClient *redis.Client
 	cqlSession  *gocql.Session
+	psql        *sql.DB
 )
 
 type Post struct {
@@ -52,6 +50,8 @@ type Post struct {
 }
 
 func init() {
+	loadEnv()
+
 	cluster := gocql.NewCluster("127.0.0.1")
 	cluster.Keyspace = "user_posts"
 	var err error
@@ -68,6 +68,10 @@ func init() {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 	redisClient = rdb
+	psql, err = sql.Open("postgres", os.Getenv("DB_URL"))
+	if err != nil {
+		log.Fatalf("failed to connect to the database: %v", err)
+	}
 }
 
 func loadEnv() {
@@ -78,7 +82,6 @@ func loadEnv() {
 }
 
 func main() {
-	defer cqlSession.Close()
 
 	r := gin.Default()
 
@@ -87,7 +90,6 @@ func main() {
 		fmt.Println(err)
 	}
 
-	loadEnv()
 	list, err := getFollowing(28)
 	if err != nil {
 		fmt.Println(err)
@@ -115,6 +117,9 @@ func main() {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
+
+	defer psql.Close()
+	defer cqlSession.Close()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
@@ -199,7 +204,6 @@ func handleAddUserPostsToFeed(c *gin.Context) {
 		})
 	}
 
-	// Check for any errors during iteration
 	if err := iter.Close(); err != nil {
 		log.Fatal(err)
 	}
@@ -208,6 +212,8 @@ func handleAddUserPostsToFeed(c *gin.Context) {
 type Payload struct {
 	User         int
 	Post_content string
+	Created_at   time.Time
+	Id           int
 }
 
 func handlePost(c *gin.Context) {
@@ -215,12 +221,58 @@ func handlePost(c *gin.Context) {
 	if err := c.BindJSON(&payload); err != nil {
 		fmt.Println(err)
 	}
-	fmt.Println("payload: ", payload)
+	payload.Created_at = time.Now()
+	payload.Id = 1
 	postToKafka(payload.User, payload.Post_content, "user_posts")
+	fanoutPost(payload, payload.User)
+}
+
+func fanoutPost(post Payload, userID int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	active, err := getActiveFollowers(userID)
+	if err != nil {
+		return fmt.Errorf("failed to get active followers")
+	}
+	for i := 0; i < len(active); i++ {
+		redisClient.ZAdd(ctx, fmt.Sprintf("feed:%d", active[i]), redis.Z{
+			Score:  float64(post.Created_at.Unix()),
+			Member: post.Id,
+		})
+	}
+	return nil
+}
+
+func getActiveFollowers(userID int) ([]int, error) {
+	var active_users []int
+	query := "SELECT f.follower_id FROM followers f INNER JOIN user_activity ua ON f.follower_id = ua.user_id WHERE f.following_id = $1 AND ua.last_active >= CURRENT_TIMESTAMP - INTERVAL '12 hours';"
+	rows, err := psql.Query(query, userID)
+	if err != nil {
+		return []int{0}, fmt.Errorf("failed to execute the query: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var follower int
+		err := rows.Scan(&follower)
+		if err != nil {
+			return []int{0}, fmt.Errorf("failed to scan row: %v", err)
+		}
+		active_users = append(active_users, follower)
+	}
+	fmt.Println("active users:", active_users)
+	return active_users, nil
 }
 
 func handleRead(c *gin.Context, list map[int]int) {
-	readKafka("user_posts", list)
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Println("Failed to upgrade the connection to WebSocket:", err)
+		return
+	}
+	defer conn.Close()
+	readKafka("user_posts", list, conn)
 }
 
 func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Conn, error) {
@@ -235,7 +287,6 @@ func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Co
 }
 
 func postToKafka(userID int, content string, topic string) error {
-	// Create a Kafka writer
 	writer := &kafka.Writer{
 		Addr:     kafka.TCP("localhost:9092"),
 		Topic:    topic,
@@ -263,12 +314,14 @@ func postToKafka(userID int, content string, topic string) error {
 	return nil
 }
 
-func readKafka(topic string, following map[int]int) {
+func readKafka(topic string, following map[int]int, conn *websocket.Conn) {
+	stopChan := make(chan struct{})
+
+	// Create the Kafka reader configuration
 	brokers := []string{"localhost:9092"}
 	config := kafka.ReaderConfig{
-		// GroupID:         """,
 		Brokers:         brokers,
-		Topic:           topic,
+		Topic:           topic, // Replace with your Kafka topic
 		MinBytes:        10e3,
 		MaxBytes:        10e6,
 		MaxWait:         1 * time.Second,
@@ -282,7 +335,6 @@ func readKafka(topic string, following map[int]int) {
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
 
 	var wg sync.WaitGroup
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -290,6 +342,8 @@ func readKafka(topic string, following map[int]int) {
 		for {
 			select {
 			case <-sigchan:
+				return
+			case <-stopChan:
 				return
 			default:
 				m, err := reader.ReadMessage(context.Background())
@@ -301,13 +355,26 @@ func readKafka(topic string, following map[int]int) {
 				if err != nil {
 					fmt.Println(err)
 				}
+				fmt.Println("recieved message", following)
 				if _, exists := following[userID]; exists {
-					processMessage(m)
+					err := conn.WriteMessage(websocket.TextMessage, m.Value)
+					if err != nil {
+						log.Println("Failed to write message to WebSocket:", err)
+						conn.Close()
+						stopChan <- struct{}{}
+						return
+					}
+					fmt.Println("message:", m.Value)
 				}
 			}
 		}
 	}()
 
+	_, _, err := conn.ReadMessage()
+	if err != nil {
+		log.Println("Failed to read message from WebSocket:", err)
+	}
+	stopChan <- struct{}{}
 	wg.Wait()
 }
 
@@ -316,15 +383,9 @@ func processMessage(m kafka.Message) {
 }
 
 func getFollowing(userID int) (map[int]int, error) {
-	db, err := sql.Open("postgres", os.Getenv("DB_URL"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to the database: %v", err)
-	}
-	defer db.Close()
-
 	query := "SELECT following_id FROM followers WHERE follower_id = $1"
 
-	rows, err := db.Query(query, userID)
+	rows, err := psql.Query(query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute the query: %v", err)
 	}
@@ -346,3 +407,51 @@ func getFollowing(userID int) (map[int]int, error) {
 	}
 	return users, nil
 }
+
+// func readKafka(topic string, following map[int]int) {
+// 	brokers := []string{"localhost:9092"}
+// 	config := kafka.ReaderConfig{
+// 		// GroupID:         """,
+// 		Brokers:         brokers,
+// 		Topic:           topic,
+// 		MinBytes:        10e3,
+// 		MaxBytes:        10e6,
+// 		MaxWait:         1 * time.Second,
+// 		ReadLagInterval: -1,
+// 	}
+
+// 	reader := kafka.NewReader(config)
+// 	defer reader.Close()
+
+// 	sigchan := make(chan os.Signal, 1)
+// 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
+
+// 	var wg sync.WaitGroup
+
+// 	wg.Add(1)
+// 	go func() {
+// 		defer wg.Done()
+
+// 		for {
+// 			select {
+// 			case <-sigchan:
+// 				return
+// 			default:
+// 				m, err := reader.ReadMessage(context.Background())
+// 				if err != nil {
+// 					log.Println("Error reading message:", err)
+// 					continue
+// 				}
+// 				userID, err := strconv.Atoi(string(m.Key))
+// 				if err != nil {
+// 					fmt.Println(err)
+// 				}
+// 				if _, exists := following[userID]; exists {
+// 					processMessage(m)
+// 				}
+// 			}
+// 		}
+// 	}()
+
+// 	wg.Wait()
+// }
