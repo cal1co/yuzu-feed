@@ -163,9 +163,7 @@ func handleFeed(c *gin.Context) {
 		log.Fatal(err)
 	}
 
-	// Process the retrieved post IDs (e.g., fetch post details from another data source)
 	for _, postID := range postIDs {
-		// Process each post ID
 		fmt.Println("Post ID:", postID)
 	}
 }
@@ -179,10 +177,7 @@ func getFeedPages(userId int) (int64, error) {
 	}
 	return totalPosts, nil
 }
-
 func handleAddUserPostsToFeed(c *gin.Context) {
-	// select all from cassandra
-	// add posts to user feed as sorted set
 	var followedUser FollowFeedPayload
 	if err := c.BindJSON(&followedUser); err != nil {
 		fmt.Println(err)
@@ -226,7 +221,6 @@ func handlePost(c *gin.Context) {
 	postToKafka(payload.User, payload.Post_content, "user_posts")
 	fanoutPost(payload, payload.User)
 }
-
 func fanoutPost(post Payload, userID int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -272,7 +266,7 @@ func handleRead(c *gin.Context, list map[int]int) {
 		return
 	}
 	defer conn.Close()
-	readKafka("user_posts", list, conn)
+	readKafka("user_posts", list, conn, 28)
 }
 
 func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Conn, error) {
@@ -314,14 +308,13 @@ func postToKafka(userID int, content string, topic string) error {
 	return nil
 }
 
-func readKafka(topic string, following map[int]int, conn *websocket.Conn) {
+func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID int) {
 	stopChan := make(chan struct{})
 
-	// Create the Kafka reader configuration
 	brokers := []string{"localhost:9092"}
 	config := kafka.ReaderConfig{
 		Brokers:         brokers,
-		Topic:           topic, // Replace with your Kafka topic
+		Topic:           topic,
 		MinBytes:        10e3,
 		MaxBytes:        10e6,
 		MaxWait:         1 * time.Second,
@@ -339,6 +332,16 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn) {
 	go func() {
 		defer wg.Done()
 
+		lastOffset, err := getOffset(userID)
+		if err != nil {
+			log.Println("Failed to get offset from Redis:", err)
+			// Set the offset to the start (0) if it doesn't exist in Redis
+			lastOffset = 0
+		}
+
+		// Set the starting offset for the reader
+		reader.SetOffset(lastOffset)
+
 		for {
 			select {
 			case <-sigchan:
@@ -351,12 +354,11 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn) {
 					log.Println("Error reading message:", err)
 					continue
 				}
-				userID, err := strconv.Atoi(string(m.Key))
+				posterId, err := strconv.Atoi(string(m.Key))
 				if err != nil {
 					fmt.Println(err)
 				}
-				fmt.Println("recieved message", following)
-				if _, exists := following[userID]; exists {
+				if _, exists := following[posterId]; exists {
 					err := conn.WriteMessage(websocket.TextMessage, m.Value)
 					if err != nil {
 						log.Println("Failed to write message to WebSocket:", err)
@@ -364,7 +366,13 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn) {
 						stopChan <- struct{}{}
 						return
 					}
-					fmt.Println("message:", m.Value)
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					redisClient.ZAdd(ctx, fmt.Sprintf("feed:%d", userID), redis.Z{
+						Score:  float64(m.Time.Unix()),
+						Member: m.Value,
+					})
+					storeOffset(userID, m.Offset)
 				}
 			}
 		}
@@ -377,7 +385,27 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn) {
 	stopChan <- struct{}{}
 	wg.Wait()
 }
+func storeOffset(userID int, offset int64) error {
+	ctx := context.Background()
 
+	err := redisClient.Set(ctx, fmt.Sprintf("offset:user:%d", userID), offset, 0).Err()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func getOffset(userID int) (int64, error) {
+	ctx := context.Background()
+
+	offset, err := redisClient.Get(ctx, fmt.Sprintf("offset:user:%d", userID)).Int64()
+	if err != nil {
+		return 0, err
+	}
+
+	return offset, nil
+}
 func processMessage(m kafka.Message) {
 	fmt.Println("PROCESSING MESSAGE", m)
 }
@@ -407,51 +435,3 @@ func getFollowing(userID int) (map[int]int, error) {
 	}
 	return users, nil
 }
-
-// func readKafka(topic string, following map[int]int) {
-// 	brokers := []string{"localhost:9092"}
-// 	config := kafka.ReaderConfig{
-// 		// GroupID:         """,
-// 		Brokers:         brokers,
-// 		Topic:           topic,
-// 		MinBytes:        10e3,
-// 		MaxBytes:        10e6,
-// 		MaxWait:         1 * time.Second,
-// 		ReadLagInterval: -1,
-// 	}
-
-// 	reader := kafka.NewReader(config)
-// 	defer reader.Close()
-
-// 	sigchan := make(chan os.Signal, 1)
-// 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-
-// 	var wg sync.WaitGroup
-
-// 	wg.Add(1)
-// 	go func() {
-// 		defer wg.Done()
-
-// 		for {
-// 			select {
-// 			case <-sigchan:
-// 				return
-// 			default:
-// 				m, err := reader.ReadMessage(context.Background())
-// 				if err != nil {
-// 					log.Println("Error reading message:", err)
-// 					continue
-// 				}
-// 				userID, err := strconv.Atoi(string(m.Key))
-// 				if err != nil {
-// 					fmt.Println(err)
-// 				}
-// 				if _, exists := following[userID]; exists {
-// 					processMessage(m)
-// 				}
-// 			}
-// 		}
-// 	}()
-
-// 	wg.Wait()
-// }
