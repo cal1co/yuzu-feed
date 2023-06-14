@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -24,8 +25,8 @@ import (
 )
 
 // TODO: Configure adding posts from post service to feeds <- COMPLETED
+// TODO: Configure JWT so users aren't hard coded <- COMPLETED
 
-// TODO: Configure JWT so users aren't hard coded
 // TODO: refactor code - handlers file, delete repeated code, general sepearation of concerns
 // TODO: Configure expiration of redis items
 // TODO: Separate redis cache's for different services
@@ -90,37 +91,37 @@ func loadEnv() {
 	}
 }
 func main() {
-
-	r := gin.Default()
-
 	_, err := createTopic("user_posts", 0, 0)
 	if err != nil {
 		fmt.Println(err)
+		return
 	}
 
-	list, err := getFollowing(28)
-	if err != nil {
-		fmt.Println(err)
-	}
-	fmt.Println("FOLLOW LIST", list)
+	r := gin.Default()
 
 	r.Use(middleware.RateLimiterMiddleware())
-	r.Use(middleware.AuthMiddleware())
+
 	r.POST("/post", func(c *gin.Context) {
 		handlePost(c)
 	})
 
-	r.GET("/", func(c *gin.Context) {
-		handleRead(c, list)
-	})
+	authenticatedRoutes := r.Group("/v1")
+	authenticatedRoutes.Use(middleware.AuthMiddleware())
+	{
 
-	r.POST("/addpoststofeed", func(c *gin.Context) {
-		handleAddUserPostsToFeed(c)
-	})
+		authenticatedRoutes.GET("/connect", func(c *gin.Context) {
+			handleRead(c)
+		})
 
-	r.GET("/feed/:pageId", func(c *gin.Context) {
-		handleFeed(c)
-	})
+		authenticatedRoutes.POST("/addpoststofeed", func(c *gin.Context) {
+			handleAddUserPostsToFeed(c)
+		})
+
+		authenticatedRoutes.GET("/feed/:pageId", func(c *gin.Context) {
+			handleFeed(c)
+		})
+
+	}
 
 	go func() {
 		if err := r.Run(":8081"); err != nil {
@@ -141,15 +142,16 @@ func main() {
 }
 
 type FollowFeedPayload struct {
-	Id       int
-	Follower int
-}
-
-type FeedGetterPayload struct {
-	Id int
+	Follow_id int
 }
 
 func handleFeed(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		ThrowUserIDExtractError(c)
+		return
+	}
+	uid := int(userID.(float64))
 	num, err := getFeedPages(0)
 	if err != nil {
 		fmt.Println(err)
@@ -162,13 +164,10 @@ func handleFeed(c *gin.Context) {
 	fmt.Println(fmt.Sprintf("THERE ARE %d pages", int(math.Ceil(float64(num))/float64(pageSize))))
 	end := page_num * pageSize
 	start := end - pageSize
-	var user FeedGetterPayload
-	if err := c.BindJSON(&user); err != nil {
-		fmt.Println(err)
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	postIDs, err := redisClient.ZRevRange(ctx, fmt.Sprintf("feed:%d", user.Id), int64(start), int64(end-1)).Result()
+	postIDs, err := redisClient.ZRevRange(ctx, fmt.Sprintf("feed:%d", uid), int64(start), int64(end-1)).Result()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -188,11 +187,17 @@ func getFeedPages(userId int) (int64, error) {
 	return totalPosts, nil
 }
 func handleAddUserPostsToFeed(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		ThrowUserIDExtractError(c)
+		return
+	}
+	uid := int(userID.(float64))
 	var followedUser FollowFeedPayload
 	if err := c.BindJSON(&followedUser); err != nil {
 		fmt.Println(err)
 	}
-	query := cqlSession.Query("SELECT post_id, created_at FROM posts WHERE user_id = ? AND created_at <= ?", followedUser.Id, time.Now())
+	query := cqlSession.Query("SELECT post_id, created_at FROM posts WHERE user_id = ? AND created_at <= ?", followedUser.Follow_id, time.Now())
 
 	iter := query.Iter()
 	var postId string
@@ -200,7 +205,7 @@ func handleAddUserPostsToFeed(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	feedKey := fmt.Sprintf("feed:%d", followedUser.Follower)
+	feedKey := fmt.Sprintf("feed:%d", uid)
 	fmt.Println(feedKey)
 	for iter.Scan(&postId, &created_at) {
 		redisClient.ZAdd(ctx, feedKey, redis.Z{
@@ -285,15 +290,30 @@ func getActiveFollowers(userID int) ([]int, error) {
 	fmt.Println("active users:", active_users)
 	return active_users, nil
 }
-
-func handleRead(c *gin.Context, list map[int]int) {
+func ThrowUserIDExtractError(c *gin.Context) {
+	c.JSON(http.StatusNotFound, "Couldn't extract uid")
+	c.AbortWithStatus(http.StatusBadRequest)
+}
+func handleRead(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		ThrowUserIDExtractError(c)
+		return
+	}
+	uid := int(userID.(float64))
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Println("Failed to upgrade the connection to WebSocket:", err)
 		return
 	}
 	defer conn.Close()
-	readKafka("user_posts", list, conn, 28)
+	followingList, err := getFollowing(uid)
+	if err != nil {
+		fmt.Println(err)
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	readKafka("user_posts", followingList, conn, uid)
 }
 
 func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Conn, error) {
