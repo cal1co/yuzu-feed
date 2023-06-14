@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cal1co/yuzu-feed/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
 	"github.com/gorilla/websocket"
@@ -103,6 +104,8 @@ func main() {
 	}
 	fmt.Println("FOLLOW LIST", list)
 
+	r.Use(middleware.RateLimiterMiddleware())
+	r.Use(middleware.AuthMiddleware())
 	r.POST("/post", func(c *gin.Context) {
 		handlePost(c)
 	})
