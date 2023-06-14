@@ -22,6 +22,22 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
+// TODO: Configure adding posts from post service to feeds <- COMPLETED
+
+// TODO: Configure JWT so users aren't hard coded
+// TODO: refactor code - handlers file, delete repeated code, general sepearation of concerns
+// TODO: Configure expiration of redis items
+// TODO: Separate redis cache's for different services
+
+type Post struct {
+	ID          gocql.UUID `json:"post_id"`
+	UserID      int        `json:"user_id"`
+	PostContent string     `json:"post_content"`
+	CreatedAt   time.Time  `json:"created_at"`
+	Likes       int        `json:"like_count"`
+	Comments    int        `json:"comments_count"`
+}
+
 var (
 	kafkaBroker   = "localhost:9092"
 	kafkaTopic    = "user_posts"
@@ -41,13 +57,6 @@ var (
 	cqlSession  *gocql.Session
 	psql        *sql.DB
 )
-
-type Post struct {
-	UserID   int    `json:"userId"`
-	PostID   int    `json:"postId"`
-	Content  string `json:"content"`
-	DateTime string `json:"dateTime"`
-}
 
 func init() {
 	loadEnv()
@@ -73,14 +82,12 @@ func init() {
 		log.Fatalf("failed to connect to the database: %v", err)
 	}
 }
-
 func loadEnv() {
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
 }
-
 func main() {
 
 	r := gin.Default()
@@ -96,7 +103,7 @@ func main() {
 	}
 	fmt.Println("FOLLOW LIST", list)
 
-	r.POST("/", func(c *gin.Context) {
+	r.POST("/post", func(c *gin.Context) {
 		handlePost(c)
 	})
 
@@ -204,35 +211,52 @@ func handleAddUserPostsToFeed(c *gin.Context) {
 	}
 }
 
-type Payload struct {
-	User         int
-	Post_content string
-	Created_at   time.Time
-	Id           int
-}
-
 func handlePost(c *gin.Context) {
-	var payload Payload
-	if err := c.BindJSON(&payload); err != nil {
+	var post Post
+	if err := c.BindJSON(&post); err != nil {
 		fmt.Println(err)
 	}
-	payload.Created_at = time.Now()
-	payload.Id = 1
-	postToKafka(payload.User, payload.Post_content, "user_posts")
-	fanoutPost(payload, payload.User)
+	postToKafka(post, "user_posts")
+	fanoutPost(post)
 }
-func fanoutPost(post Payload, userID int) error {
+func postToKafka(post Post, topic string) error {
+	writer := &kafka.Writer{
+		Addr:     kafka.TCP("localhost:9092"),
+		Topic:    topic,
+		Balancer: &kafka.LeastBytes{},
+	}
+
+	defer writer.Close()
+
+	err := writer.WriteMessages(context.Background(),
+		kafka.Message{
+			Key:   []byte(strconv.Itoa(post.UserID)),
+			Value: []byte(post.ID.String()),
+		},
+	)
+	if err != nil {
+		fmt.Printf("failed to write messages: %s", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		fmt.Printf("failed to close writer: %s", err)
+	}
+
+	log.Printf("Message posted to Kafka successfully")
+	return nil
+}
+func fanoutPost(post Post) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	active, err := getActiveFollowers(userID)
+	active, err := getActiveFollowers(post.UserID)
 	if err != nil {
 		return fmt.Errorf("failed to get active followers")
 	}
 	for i := 0; i < len(active); i++ {
 		redisClient.ZAdd(ctx, fmt.Sprintf("feed:%d", active[i]), redis.Z{
-			Score:  float64(post.Created_at.Unix()),
-			Member: post.Id,
+			Score:  float64(post.CreatedAt.Unix()),
+			Member: post.ID,
 		})
 	}
 	return nil
@@ -270,7 +294,6 @@ func handleRead(c *gin.Context, list map[int]int) {
 }
 
 func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Conn, error) {
-	// Create an admin client
 	conn, err := kafka.DialLeader(context.Background(), "tcp", "localhost:9092", topic, partitions)
 	if err != nil {
 		panic(err.Error())
@@ -278,34 +301,6 @@ func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Co
 
 	log.Printf("Topic '%s' created successfully", topic)
 	return conn, nil
-}
-
-func postToKafka(userID int, content string, topic string) error {
-	writer := &kafka.Writer{
-		Addr:     kafka.TCP("localhost:9092"),
-		Topic:    topic,
-		Balancer: &kafka.LeastBytes{},
-	}
-
-	defer writer.Close()
-
-	// Produce a message to the Kafka topic
-	err := writer.WriteMessages(context.Background(),
-		kafka.Message{
-			Key:   []byte(strconv.Itoa(userID)),
-			Value: []byte(content),
-		},
-	)
-	if err != nil {
-		log.Fatal("failed to write messages:", err)
-	}
-
-	if err := writer.Close(); err != nil {
-		log.Fatal("failed to close writer:", err)
-	}
-
-	log.Printf("Message posted to Kafka successfully")
-	return nil
 }
 
 func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID int) {
@@ -335,11 +330,9 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID
 		lastOffset, err := getOffset(userID)
 		if err != nil {
 			log.Println("Failed to get offset from Redis:", err)
-			// Set the offset to the start (0) if it doesn't exist in Redis
 			lastOffset = 0
 		}
 
-		// Set the starting offset for the reader
 		reader.SetOffset(lastOffset)
 
 		for {
@@ -372,7 +365,7 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID
 						Score:  float64(m.Time.Unix()),
 						Member: m.Value,
 					})
-					storeOffset(userID, m.Offset)
+					storeOffset(userID, m.Offset+1)
 				}
 			}
 		}
