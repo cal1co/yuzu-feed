@@ -10,6 +10,7 @@ import (
 
 	"github.com/cal1co/yuzu-feed/handlers"
 	"github.com/cal1co/yuzu-feed/middleware"
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
 	"github.com/joho/godotenv"
@@ -18,10 +19,6 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-// TODO: Configure adding posts from post service to feeds <- COMPLETED
-// TODO: Configure JWT so users aren't hard coded <- COMPLETED
-
-// TODO: refactor code - handlers file, delete repeated code, general sepearation of concerns
 // TODO: Configure expiration of redis items
 // TODO: Separate redis cache's for different services
 
@@ -31,13 +28,10 @@ var (
 	redisAddr     = "localhost:6379"
 	redisPassword = ""
 	redisDB       = 0
-)
-
-var (
-	kafkaWriter *kafka.Writer
-	redisClient *redis.Client
-	cqlSession  *gocql.Session
-	psql        *sql.DB
+	kafkaWriter   *kafka.Writer
+	redisClient   *redis.Client
+	cqlSession    *gocql.Session
+	psql          *sql.DB
 )
 
 func init() {
@@ -80,6 +74,10 @@ func main() {
 	r := gin.Default()
 
 	r.Use(middleware.RateLimiterMiddleware())
+	config := cors.DefaultConfig()
+	config.AllowMethods = []string{"GET", "POST", "DELETE", "OPTIONS"}
+	config.AddAllowHeaders("Authorization")
+	config.AllowOrigins = []string{"http://localhost:5173"}
 
 	r.POST("/post", func(c *gin.Context) {
 		handlers.HandlePost(c, redisClient, psql)
@@ -87,6 +85,7 @@ func main() {
 
 	authenticatedRoutes := r.Group("/v1")
 	authenticatedRoutes.Use(middleware.AuthMiddleware())
+	r.Use(cors.New(config))
 	{
 
 		authenticatedRoutes.GET("/connect", func(c *gin.Context) {
@@ -97,7 +96,7 @@ func main() {
 			handlers.HandleAddUserPostsToFeed(c, cqlSession, redisClient)
 		})
 
-		authenticatedRoutes.GET("/feed/:pageId", func(c *gin.Context) {
+		authenticatedRoutes.GET("/feed/:page", func(c *gin.Context) {
 			handlers.HandleFeed(c, redisClient)
 		})
 

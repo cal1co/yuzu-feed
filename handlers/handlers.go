@@ -314,11 +314,11 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client) {
 		fmt.Println(err)
 	}
 
-	page_num, err := strconv.Atoi(c.Param("pageId"))
+	page_num, err := strconv.Atoi(c.Param("page"))
 	if err != nil {
 		fmt.Println(err)
 	}
-	pageSize := 5
+	pageSize := 15
 	fmt.Println(fmt.Sprintf("THERE ARE %d pages", int(math.Ceil(float64(num))/float64(pageSize))))
 	end := page_num * pageSize
 	start := end - pageSize
@@ -333,6 +333,7 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client) {
 	for _, postID := range postIDs {
 		fmt.Println("Post ID:", postID)
 	}
+	c.JSON(http.StatusOK, postIDs)
 }
 
 func getFeedPages(userId int, redisClient *redis.Client) (int64, error) {
