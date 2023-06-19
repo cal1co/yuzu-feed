@@ -302,7 +302,7 @@ func HandleAddUserPostsToFeed(c *gin.Context, cqlSession *gocql.Session, redisCl
 	}
 }
 
-func HandleFeed(c *gin.Context, redisClient *redis.Client) {
+func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Session) {
 	uid, err := extractUserId(c)
 	if err != nil {
 		fmt.Println(err)
@@ -329,11 +329,20 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client) {
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	var posts []Post
 	for _, postID := range postIDs {
 		fmt.Println("Post ID:", postID)
+		query := `SELECT post_id, user_id, post_content, created_at FROM posts WHERE post_id = ? LIMIT 1`
+		var post Post
+		if err := cqlSession.Query(query, postID).Consistency(gocql.One).Scan(&post.ID, &post.UserID, &post.PostContent, &post.CreatedAt); err != nil {
+			fmt.Println(err)
+			c.JSON(http.StatusNotFound, fmt.Sprintf("Sorry, post with id '%s' could not be found", postID))
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		posts = append(posts, post)
 	}
-	c.JSON(http.StatusOK, postIDs)
+	c.JSON(http.StatusOK, posts)
 }
 
 func getFeedPages(userId int, redisClient *redis.Client) (int64, error) {

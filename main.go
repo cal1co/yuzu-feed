@@ -79,13 +79,13 @@ func main() {
 	config.AddAllowHeaders("Authorization")
 	config.AllowOrigins = []string{"http://localhost:5173"}
 
+	r.Use(cors.New(config))
 	r.POST("/post", func(c *gin.Context) {
 		handlers.HandlePost(c, redisClient, psql)
 	})
 
 	authenticatedRoutes := r.Group("/v1")
 	authenticatedRoutes.Use(middleware.AuthMiddleware())
-	r.Use(cors.New(config))
 	{
 
 		authenticatedRoutes.GET("/connect", func(c *gin.Context) {
@@ -97,7 +97,7 @@ func main() {
 		})
 
 		authenticatedRoutes.GET("/feed/:page", func(c *gin.Context) {
-			handlers.HandleFeed(c, redisClient)
+			handlers.HandleFeed(c, redisClient, cqlSession)
 		})
 
 	}
