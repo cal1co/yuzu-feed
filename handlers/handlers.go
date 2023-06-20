@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cal1co/yuzu-feed/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
 	"github.com/gorilla/websocket"
@@ -117,17 +118,28 @@ func getActiveFollowers(userID int, psql *sql.DB) ([]int, error) {
 	return active_users, nil
 }
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-
 func HandleRead(c *gin.Context, psql *sql.DB, redisClient *redis.Client) {
-	uid, err := extractUserId(c)
+	// uid, err := extractUserId(c)
+	// if err != nil {
+	// 	return
+	// }
+	txn := c.Param("token")
+	uid, err := middleware.ExtractUserID(txn)
 	if err != nil {
+		fmt.Println("error verifying token")
 		return
 	}
-
+	allowedOrigins := map[string]bool{
+		"http://localhost:5173": true,
+	}
+	var upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			return allowedOrigins[origin]
+		},
+	}
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Println("Failed to upgrade the connection to WebSocket:", err)
@@ -193,7 +205,7 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID
 
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-
+	fmt.Println("READING KAFKA NOW")
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -331,7 +343,6 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 	}
 	var posts []Post
 	for _, postID := range postIDs {
-		fmt.Println("Post ID:", postID)
 		query := `SELECT post_id, user_id, post_content, created_at FROM posts WHERE post_id = ? LIMIT 1`
 		var post Post
 		if err := cqlSession.Query(query, postID).Consistency(gocql.One).Scan(&post.ID, &post.UserID, &post.PostContent, &post.CreatedAt); err != nil {

@@ -83,14 +83,13 @@ func main() {
 	r.POST("/post", func(c *gin.Context) {
 		handlers.HandlePost(c, redisClient, psql)
 	})
+	r.GET("/connect/:token", func(c *gin.Context) {
+		handlers.HandleRead(c, psql, redisClient)
+	})
 
 	authenticatedRoutes := r.Group("/v1")
 	authenticatedRoutes.Use(middleware.AuthMiddleware())
 	{
-
-		authenticatedRoutes.GET("/connect", func(c *gin.Context) {
-			handlers.HandleRead(c, psql, redisClient)
-		})
 
 		authenticatedRoutes.POST("/addpoststofeed", func(c *gin.Context) {
 			handlers.HandleAddUserPostsToFeed(c, cqlSession, redisClient)
