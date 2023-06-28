@@ -96,7 +96,7 @@ func main() {
 		})
 
 		authenticatedRoutes.GET("/feed/:page", func(c *gin.Context) {
-			handlers.HandleFeed(c, redisClient, cqlSession)
+			handlers.HandleFeed(c, redisClient, cqlSession, psql)
 		})
 
 	}

@@ -29,6 +29,11 @@ type Post struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	Likes       int        `json:"like_count"`
 	Comments    int        `json:"comments_count"`
+	Username    string     `json:"username"`
+}
+type PostUser struct {
+	ID       int
+	Username string
 }
 
 func extractUserId(c *gin.Context) (int, error) {
@@ -119,10 +124,6 @@ func getActiveFollowers(userID int, psql *sql.DB) ([]int, error) {
 }
 
 func HandleRead(c *gin.Context, psql *sql.DB, redisClient *redis.Client) {
-	// uid, err := extractUserId(c)
-	// if err != nil {
-	// 	return
-	// }
 	txn := c.Param("token")
 	uid, err := middleware.ExtractUserID(txn)
 	if err != nil {
@@ -314,7 +315,7 @@ func HandleAddUserPostsToFeed(c *gin.Context, cqlSession *gocql.Session, redisCl
 	}
 }
 
-func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Session) {
+func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Session, psql *sql.DB) {
 	uid, err := extractUserId(c)
 	if err != nil {
 		fmt.Println(err)
@@ -342,6 +343,8 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 		log.Fatal(err)
 	}
 	var posts []Post
+	cachedUsers := make(map[int]string)
+
 	for _, postID := range postIDs {
 		query := `SELECT post_id, user_id, post_content, created_at FROM posts WHERE post_id = ? LIMIT 1`
 		var post Post
@@ -351,6 +354,31 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
+		_, ok := cachedUsers[post.UserID]
+		if !ok {
+			fmt.Println("userid not cached", post.UserID)
+			userSearchQuery := "SELECT username FROM users WHERE id=$1"
+			rows, err := psql.Query(userSearchQuery, post.UserID)
+			if err != nil {
+				fmt.Println("FAILED QUERY", err)
+				continue
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var postUser PostUser
+				err := rows.Scan(&postUser.Username)
+				if err != nil {
+					fmt.Println("FAILED QUERY", err)
+					continue
+				}
+				postUser.ID = post.UserID
+				cachedUsers[postUser.ID] = postUser.Username
+			}
+		} else {
+			fmt.Println("userid cached", post.UserID)
+		}
+		post.Username = cachedUsers[post.UserID]
 		posts = append(posts, post)
 	}
 	c.JSON(http.StatusOK, posts)

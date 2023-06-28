@@ -43,7 +43,6 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		token, err := verifyToken(tokenString)
 		if err != nil {
-			fmt.Println("ERROR HERE", tokenString, token, err)
 			log.Printf("error: %s", err)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid authorization token"})
 			return
@@ -62,7 +61,6 @@ func ExtractUserID(inputToken string) (int, error) {
 	tokenString := strings.Replace(inputToken, "Bearer ", "", 1)
 	token, err := verifyToken(tokenString)
 	if err != nil {
-		fmt.Println("ERROR HERE", tokenString, token, err)
 		log.Printf("error: %s", err)
 		return 0, fmt.Errorf("error: invalid authorization token")
 	}
