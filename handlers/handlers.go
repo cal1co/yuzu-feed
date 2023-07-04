@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -30,6 +33,7 @@ type Post struct {
 	Likes       int        `json:"like_count"`
 	Comments    int        `json:"comments_count"`
 	Username    string     `json:"username"`
+	Liked       bool       `json:"liked"`
 }
 type PostUser struct {
 	ID       int
@@ -345,20 +349,31 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 	var posts []Post
 	cachedUsers := make(map[int]string)
 
-	for _, postID := range postIDs {
-		query := `SELECT post_id, user_id, post_content, created_at FROM posts WHERE post_id = ? LIMIT 1`
-		var post Post
-		if err := cqlSession.Query(query, postID).Consistency(gocql.One).Scan(&post.ID, &post.UserID, &post.PostContent, &post.CreatedAt); err != nil {
-			fmt.Println(err)
-			c.JSON(http.StatusNotFound, fmt.Sprintf("Sorry, post with id '%s' could not be found", postID))
-			c.AbortWithStatus(http.StatusNotFound)
-			return
-		}
-		_, ok := cachedUsers[post.UserID]
+	endpoint := fmt.Sprintf("http://localhost:8082/posts/feed/%d", uid)
+	payload, err := json.Marshal(postIDs)
+	res, err := http.Post(endpoint, "application/json", bytes.NewBuffer(payload))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	var postData []Post
+	err = json.Unmarshal(body, &postData)
+	if err != nil {
+		fmt.Println(err)
+	}
+	for i := 0; i < len(postData); i++ {
+		fmt.Println("post", postData[i])
+		_, ok := cachedUsers[postData[i].UserID]
 		if !ok {
-			fmt.Println("userid not cached", post.UserID)
 			userSearchQuery := "SELECT username FROM users WHERE id=$1"
-			rows, err := psql.Query(userSearchQuery, post.UserID)
+			rows, err := psql.Query(userSearchQuery, postData[i].UserID)
 			if err != nil {
 				fmt.Println("FAILED QUERY", err)
 				continue
@@ -372,15 +387,14 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 					fmt.Println("FAILED QUERY", err)
 					continue
 				}
-				postUser.ID = post.UserID
+				postUser.ID = postData[i].UserID
 				cachedUsers[postUser.ID] = postUser.Username
 			}
-		} else {
-			fmt.Println("userid cached", post.UserID)
 		}
-		post.Username = cachedUsers[post.UserID]
-		posts = append(posts, post)
+		postData[i].Username = cachedUsers[postData[i].UserID]
+		posts = append(posts, postData[i])
 	}
+
 	c.JSON(http.StatusOK, posts)
 }
 
