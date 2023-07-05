@@ -26,18 +26,24 @@ import (
 )
 
 type Post struct {
-	ID          gocql.UUID `json:"post_id"`
-	UserID      int        `json:"user_id"`
-	PostContent string     `json:"post_content"`
-	CreatedAt   time.Time  `json:"created_at"`
-	Likes       int        `json:"like_count"`
-	Comments    int        `json:"comments_count"`
-	Username    string     `json:"username"`
-	Liked       bool       `json:"liked"`
+	ID               gocql.UUID `json:"post_id"`
+	UserID           int        `json:"user_id"`
+	PostContent      string     `json:"post_content"`
+	CreatedAt        time.Time  `json:"created_at"`
+	Likes            int        `json:"like_count"`
+	Comments         int        `json:"comments_count"`
+	Username         string     `json:"username"`
+	Liked            bool       `json:"liked"`
+	DisplayName      string     `json:"display_name"`
+	ProfileImageData string     `json:"profile_image_data"`
+	ProfileImage     string     `json:"profile_image"`
 }
+
 type PostUser struct {
-	ID       int
-	Username string
+	ID               int
+	Username         string
+	DisplayName      string
+	ProfileImageData string
 }
 
 func extractUserId(c *gin.Context) (int, error) {
@@ -347,7 +353,7 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 		log.Fatal(err)
 	}
 	var posts []Post
-	cachedUsers := make(map[int]string)
+	cachedUsers := make(map[int]PostUser)
 
 	endpoint := fmt.Sprintf("http://localhost:8082/posts/feed/%d", uid)
 	payload, err := json.Marshal(postIDs)
@@ -368,11 +374,11 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 	if err != nil {
 		fmt.Println(err)
 	}
+
 	for i := 0; i < len(postData); i++ {
-		fmt.Println("post", postData[i])
 		_, ok := cachedUsers[postData[i].UserID]
 		if !ok {
-			userSearchQuery := "SELECT username FROM users WHERE id=$1"
+			userSearchQuery := "SELECT username, display_name, profile_image FROM users WHERE id=$1"
 			rows, err := psql.Query(userSearchQuery, postData[i].UserID)
 			if err != nil {
 				fmt.Println("FAILED QUERY", err)
@@ -382,20 +388,37 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 
 			for rows.Next() {
 				var postUser PostUser
-				err := rows.Scan(&postUser.Username)
+				err := rows.Scan(&postUser.Username, &postUser.DisplayName, &postUser.ProfileImageData)
 				if err != nil {
 					fmt.Println("FAILED QUERY", err)
 					continue
 				}
 				postUser.ID = postData[i].UserID
-				cachedUsers[postUser.ID] = postUser.Username
+				cachedUsers[postUser.ID] = postUser
 			}
 		}
-		postData[i].Username = cachedUsers[postData[i].UserID]
+		postData[i].Username = cachedUsers[postData[i].UserID].Username
+		postData[i].DisplayName = cachedUsers[postData[i].UserID].DisplayName
+		postData[i].ProfileImageData = cachedUsers[postData[i].UserID].ProfileImageData
 		posts = append(posts, postData[i])
 	}
 
-	c.JSON(http.StatusOK, posts)
+	// endpoint = "http://localhost:3000/api/auth/s3image/feed/"
+	// payload, err = json.Marshal(postData)
+	// res, err = http.Post(endpoint, "application/json", bytes.NewBuffer(payload))
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
+	// defer res.Body.Close()
+
+	// var fullPosts []Post
+	// err = json.Unmarshal(body, &fullPosts)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// }
+
+	c.JSON(http.StatusOK, postData)
 }
 
 func getFeedPages(userId int, redisClient *redis.Client) (int64, error) {
