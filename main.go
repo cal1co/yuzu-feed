@@ -91,8 +91,12 @@ func main() {
 	authenticatedRoutes.Use(middleware.AuthMiddleware())
 	{
 
-		authenticatedRoutes.POST("/addpoststofeed", func(c *gin.Context) {
+		authenticatedRoutes.POST("/feed/post/user/follow", func(c *gin.Context) {
 			handlers.HandleAddUserPostsToFeed(c, cqlSession, redisClient)
+		})
+
+		authenticatedRoutes.POST("/feed/post/user/unfollow", func(c *gin.Context) {
+			handlers.HandlerRemoveUserPostsFromFeed(c, cqlSession, redisClient)
 		})
 
 		authenticatedRoutes.GET("/feed/:page", func(c *gin.Context) {

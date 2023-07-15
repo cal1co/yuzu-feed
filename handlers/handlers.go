@@ -243,6 +243,7 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID
 					continue
 				}
 				posterId, err := strconv.Atoi(string(m.Key))
+				fmt.Println("MESSAGE", m)
 				if err != nil {
 					fmt.Println(err)
 				}
@@ -325,6 +326,10 @@ func HandleAddUserPostsToFeed(c *gin.Context, cqlSession *gocql.Session, redisCl
 	}
 }
 
+func HandlerRemoveUserPostsFromFeed(c *gin.Context, cqlSession *gocql.Session, redisClient *redis.Client) {
+
+}
+
 func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Session, psql *sql.DB) {
 	uid, err := extractUserId(c)
 	if err != nil {
@@ -402,21 +407,6 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 		postData[i].ProfileImageData = cachedUsers[postData[i].UserID].ProfileImageData
 		posts = append(posts, postData[i])
 	}
-
-	// endpoint = "http://localhost:3000/api/auth/s3image/feed/"
-	// payload, err = json.Marshal(postData)
-	// res, err = http.Post(endpoint, "application/json", bytes.NewBuffer(payload))
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	return
-	// }
-	// defer res.Body.Close()
-
-	// var fullPosts []Post
-	// err = json.Unmarshal(body, &fullPosts)
-	// if err != nil {
-	// 	fmt.Println(err)
-	// }
 
 	c.JSON(http.StatusOK, postData)
 }
