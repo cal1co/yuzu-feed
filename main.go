@@ -7,6 +7,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/cal1co/yuzu-feed/handlers"
 	"github.com/cal1co/yuzu-feed/middleware"
@@ -64,13 +67,54 @@ func loadEnv() {
 		log.Fatal("Error loading .env file")
 	}
 }
+
+func MigrateActivityToPSQL() {
+	ctx := context.Background()
+
+	iter := redisClient.Scan(ctx, 0, "user:*:lastActive", 0).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+
+		userIDStr := strings.Split(key, ":")[1]
+		userID, err := strconv.Atoi(userIDStr)
+		if err != nil {
+			log.Printf("Failed to extract user ID from Redis key %s: %v", key, err)
+			continue
+		}
+		lastActiveStr, err := redisClient.Get(ctx, key).Result()
+		if err != nil {
+			log.Printf("Failed to retrieve last active timestamp for user ID %d: %v", userID, err)
+			continue
+		}
+
+		lastActiveTimestamp, err := strconv.ParseInt(lastActiveStr, 10, 64)
+		if err != nil {
+			log.Printf("Failed to parse last active timestamp for user ID %d: %v", userID, err)
+			continue
+		}
+		lastActive := time.Unix(lastActiveTimestamp, 0)
+
+		if _, err := psql.Query("INSERT INTO user_activity (user_id, last_active) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET last_active = EXCLUDED.last_active;", userID, lastActive); err != nil {
+			log.Printf("Failed to insert user activity for user ID %d: %v", userID, err)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		log.Printf("Failed to retrieve keys from Redis: %v", err)
+	}
+}
+
 func main() {
 	_, err := createTopic("user_posts", 0, 0)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-
+	go func() {
+		for {
+			MigrateActivityToPSQL()
+			time.Sleep(time.Minute)
+		}
+	}()
 	r := gin.Default()
 
 	r.Use(middleware.RateLimiterMiddleware())
@@ -91,11 +135,11 @@ func main() {
 	authenticatedRoutes.Use(middleware.AuthMiddleware())
 	{
 
-		authenticatedRoutes.POST("/feed/post/user/follow", func(c *gin.Context) {
+		authenticatedRoutes.GET("/feed/post/user/follow/:id", func(c *gin.Context) {
 			handlers.HandleAddUserPostsToFeed(c, cqlSession, redisClient)
 		})
 
-		authenticatedRoutes.POST("/feed/post/user/unfollow", func(c *gin.Context) {
+		authenticatedRoutes.GET("/feed/post/user/unfollow/:id", func(c *gin.Context) {
 			handlers.HandlerRemoveUserPostsFromFeed(c, cqlSession, redisClient)
 		})
 

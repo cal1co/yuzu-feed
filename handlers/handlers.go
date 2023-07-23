@@ -58,10 +58,13 @@ func extractUserId(c *gin.Context) (int, error) {
 func addPostToRedisFeed(uid int, redisClient *redis.Client, post Post) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	redisClient.ZAdd(ctx, fmt.Sprintf("feed:%d", uid), redis.Z{
+	fmt.Println(uid, post.CreatedAt)
+	if err := redisClient.ZAdd(ctx, fmt.Sprintf("feed:%d", uid), redis.Z{
 		Score:  float64(post.CreatedAt.Unix()),
-		Member: post.ID,
-	})
+		Member: post.ID.String(),
+	}).Err(); err != nil {
+		fmt.Println(err)
+	}
 }
 
 func HandlePost(c *gin.Context, redisClient *redis.Client, psql *sql.DB) {
@@ -69,6 +72,7 @@ func HandlePost(c *gin.Context, redisClient *redis.Client, psql *sql.DB) {
 	if err := c.BindJSON(&post); err != nil {
 		fmt.Println(err)
 	}
+	post.CreatedAt = time.Now().UTC()
 	postToKafka(post, "user_posts")
 	fanoutPost(post, redisClient, psql)
 }
@@ -216,7 +220,6 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID
 
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-	fmt.Println("READING KAFKA NOW")
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -228,7 +231,7 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID
 			lastOffset = 0
 		}
 
-		reader.SetOffset(lastOffset)
+		reader.SetOffset(lastOffset + 1)
 
 		for {
 			select {
@@ -243,7 +246,6 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID
 					continue
 				}
 				posterId, err := strconv.Atoi(string(m.Key))
-				fmt.Println("MESSAGE", m)
 				if err != nil {
 					fmt.Println(err)
 				}
@@ -257,11 +259,12 @@ func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID
 					}
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					defer cancel()
+					fmt.Printf("kafka feed uid feed:%d", userID)
 					redisClient.ZAdd(ctx, fmt.Sprintf("feed:%d", userID), redis.Z{
 						Score:  float64(m.Time.Unix()),
 						Member: m.Value,
 					})
-					storeOffset(userID, m.Offset+1, redisClient)
+					storeOffset(userID, m.Offset, redisClient)
 				}
 			}
 		}
@@ -302,10 +305,7 @@ func HandleAddUserPostsToFeed(c *gin.Context, cqlSession *gocql.Session, redisCl
 	if err != nil {
 		return
 	}
-	var followedUser int
-	if err := c.BindJSON(&followedUser); err != nil {
-		fmt.Println(err)
-	}
+	followedUser := c.Param("id")
 	query := cqlSession.Query("SELECT post_id, created_at FROM posts WHERE user_id = ? AND created_at <= ?", followedUser, time.Now())
 
 	iter := query.Iter()
@@ -322,12 +322,35 @@ func HandleAddUserPostsToFeed(c *gin.Context, cqlSession *gocql.Session, redisCl
 	}
 
 	if err := iter.Close(); err != nil {
-		log.Fatal(err)
+		c.JSON(http.StatusInternalServerError, "Error adding user posts to feed")
+		return
 	}
+	c.JSON(http.StatusOK, "added user posts from feed")
 }
 
 func HandlerRemoveUserPostsFromFeed(c *gin.Context, cqlSession *gocql.Session, redisClient *redis.Client) {
+	uid, err := extractUserId(c)
+	if err != nil {
+		return
+	}
+	followedUser := c.Param("id")
+	query := cqlSession.Query("SELECT post_id, created_at FROM posts WHERE user_id = ? AND created_at <= ?", followedUser, time.Now())
 
+	iter := query.Iter()
+	var postId string
+	var created_at time.Time
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for iter.Scan(&postId, &created_at) {
+		redisClient.ZRem(ctx, fmt.Sprintf("feed:%d", uid), postId)
+	}
+
+	if err := iter.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, "Error adding user posts to feed")
+		return
+	}
+	c.JSON(http.StatusOK, "removed user posts from feed")
 }
 
 func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Session, psql *sql.DB) {
