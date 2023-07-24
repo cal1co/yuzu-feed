@@ -3,7 +3,6 @@ package handlers
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
 	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 )
@@ -67,14 +67,20 @@ func addPostToRedisFeed(uid int, redisClient *redis.Client, post Post) {
 	}
 }
 
-func HandlePost(c *gin.Context, redisClient *redis.Client, psql *sql.DB) {
+func HandlePost(c *gin.Context, redisClient *redis.Client, psqlPool *pgxpool.Pool) {
+	conn, err := psqlPool.Acquire(c)
+	if err != nil {
+		c.String(500, "Failed to acquire database connection")
+		return
+	}
+	defer conn.Release()
 	var post Post
 	if err := c.BindJSON(&post); err != nil {
 		fmt.Println(err)
 	}
 	post.CreatedAt = time.Now().UTC()
 	postToKafka(post, "user_posts")
-	fanoutPost(post, redisClient, psql)
+	fanoutPost(post, redisClient, conn)
 }
 
 func postToKafka(post Post, topic string) error {
@@ -104,9 +110,9 @@ func postToKafka(post Post, topic string) error {
 	return nil
 }
 
-func fanoutPost(post Post, redisClient *redis.Client, psql *sql.DB) error {
+func fanoutPost(post Post, redisClient *redis.Client, conn *pgxpool.Conn) error {
 
-	active, err := getActiveFollowers(post.UserID, psql)
+	active, err := getActiveFollowers(post.UserID, conn)
 	if err != nil {
 		return fmt.Errorf("failed to get active followers")
 	}
@@ -116,10 +122,10 @@ func fanoutPost(post Post, redisClient *redis.Client, psql *sql.DB) error {
 	return nil
 }
 
-func getActiveFollowers(userID int, psql *sql.DB) ([]int, error) {
+func getActiveFollowers(userID int, psql *pgxpool.Conn) ([]int, error) {
 	var active_users []int
 	query := "SELECT f.follower_id FROM followers f INNER JOIN user_activity ua ON f.follower_id = ua.user_id WHERE f.following_id = $1 AND ua.last_active >= CURRENT_TIMESTAMP - INTERVAL '12 hours';"
-	rows, err := psql.Query(query, userID)
+	rows, err := psql.Query(context.Background(), query, userID)
 	if err != nil {
 		return []int{0}, fmt.Errorf("failed to execute the query: %v", err)
 	}
@@ -137,7 +143,7 @@ func getActiveFollowers(userID int, psql *sql.DB) ([]int, error) {
 	return active_users, nil
 }
 
-func HandleRead(c *gin.Context, psql *sql.DB, redisClient *redis.Client) {
+func HandleRead(c *gin.Context, psql *pgxpool.Pool, redisClient *redis.Client) {
 	txn := c.Param("token")
 	uid, err := middleware.ExtractUserID(txn)
 	if err != nil {
@@ -170,10 +176,10 @@ func HandleRead(c *gin.Context, psql *sql.DB, redisClient *redis.Client) {
 	readKafka("user_posts", followingList, conn, uid, redisClient)
 }
 
-func getFollowing(userID int, psql *sql.DB) (map[int]int, error) {
+func getFollowing(userID int, conn *pgxpool.Pool) (map[int]int, error) {
 	query := "SELECT following_id FROM followers WHERE follower_id = $1"
 
-	rows, err := psql.Query(query, userID)
+	rows, err := conn.Query(context.Background(), query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute the query: %v", err)
 	}
@@ -353,7 +359,14 @@ func HandlerRemoveUserPostsFromFeed(c *gin.Context, cqlSession *gocql.Session, r
 	c.JSON(http.StatusOK, "removed user posts from feed")
 }
 
-func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Session, psql *sql.DB) {
+func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Session, psqlPool *pgxpool.Pool) {
+	conn, err := psqlPool.Acquire(c)
+	if err != nil {
+		c.String(500, "Failed to acquire database connection")
+		return
+	}
+	defer conn.Release()
+
 	uid, err := extractUserId(c)
 	if err != nil {
 		fmt.Println(err)
@@ -407,7 +420,7 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 		_, ok := cachedUsers[postData[i].UserID]
 		if !ok {
 			userSearchQuery := "SELECT username, display_name, profile_image FROM users WHERE id=$1"
-			rows, err := psql.Query(userSearchQuery, postData[i].UserID)
+			rows, err := conn.Query(context.Background(), userSearchQuery, postData[i].UserID)
 			if err != nil {
 				fmt.Println("FAILED QUERY", err)
 				continue

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	redis "github.com/redis/go-redis/v9"
@@ -34,7 +34,7 @@ var (
 	kafkaWriter   *kafka.Writer
 	redisClient   *redis.Client
 	cqlSession    *gocql.Session
-	psql          *sql.DB
+	psql          *pgxpool.Pool
 )
 
 func init() {
@@ -56,9 +56,10 @@ func init() {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 	redisClient = rdb
-	psql, err = sql.Open("postgres", os.Getenv("DB_URL"))
+	psql, err = pgxpool.New(context.Background(), os.Getenv("DB_URL"))
 	if err != nil {
-		log.Fatalf("failed to connect to the database: %v", err)
+		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
+		os.Exit(1)
 	}
 }
 func loadEnv() {
@@ -72,6 +73,7 @@ func MigrateActivityToPSQL() {
 	ctx := context.Background()
 
 	iter := redisClient.Scan(ctx, 0, "user:*:lastActive", 0).Iterator()
+
 	for iter.Next(ctx) {
 		key := iter.Val()
 
@@ -94,9 +96,27 @@ func MigrateActivityToPSQL() {
 		}
 		lastActive := time.Unix(lastActiveTimestamp, 0)
 
-		if _, err := psql.Query("INSERT INTO user_activity (user_id, last_active) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET last_active = EXCLUDED.last_active;", userID, lastActive); err != nil {
-			log.Printf("Failed to insert user activity for user ID %d: %v", userID, err)
+		conn, err := psql.Acquire(context.Background())
+		if err != nil {
+			fmt.Println(500, "Failed to acquire database connection")
+			return
 		}
+
+		currentTime := time.Now().UTC()
+
+		thresholdDuration := 30 * time.Minute
+
+		if currentTime.Sub(lastActive) <= thresholdDuration {
+			if _, err := conn.Exec(context.Background(), "INSERT INTO user_activity (user_id, last_active) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET last_active = EXCLUDED.last_active", userID, lastActive); err != nil {
+				log.Printf("Failed to insert user activity for user ID %d: %v", userID, err)
+			}
+		} else {
+			if _, err := redisClient.Del(ctx, key).Result(); err != nil {
+				log.Printf("Failed to delete user ID %d from Redis cache: %v", userID, err)
+			}
+		}
+		defer conn.Release()
+
 	}
 	if err := iter.Err(); err != nil {
 		log.Printf("Failed to retrieve keys from Redis: %v", err)
@@ -104,17 +124,23 @@ func MigrateActivityToPSQL() {
 }
 
 func main() {
+
+	defer cqlSession.Close()
+	defer psql.Close()
+
 	_, err := createTopic("user_posts", 0, 0)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+
 	go func() {
 		for {
 			MigrateActivityToPSQL()
 			time.Sleep(time.Minute)
 		}
 	}()
+
 	r := gin.Default()
 
 	r.Use(middleware.RateLimiterMiddleware())
@@ -154,9 +180,6 @@ func main() {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
-
-	defer psql.Close()
-	defer cqlSession.Close()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
