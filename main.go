@@ -26,7 +26,7 @@ import (
 // TODO: Separate redis cache's for different services
 
 var (
-	// kafkaBroker   = "localhost:9092"
+	kafkaBroker   = "broker:9092"
 	kafkaTopic    = "user_posts"
 	redisAddr     = "yuzu-feeds:6379"
 	redisPassword = ""
@@ -40,7 +40,7 @@ var (
 func init() {
 	loadEnv()
 
-	cluster := gocql.NewCluster("127.0.0.1")
+	cluster := gocql.NewCluster("cassandra")
 	cluster.Keyspace = "user_posts"
 	var err error
 	cqlSession, err = cluster.CreateSession()
@@ -128,7 +128,7 @@ func main() {
 	defer cqlSession.Close()
 	defer psql.Close()
 
-	_, err := createTopic("user_posts", 0, 0)
+	_, err := createTopic("user_posts", 0, 1)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -176,7 +176,7 @@ func main() {
 	}
 
 	go func() {
-		if err := r.Run(":8081"); err != nil {
+		if err := r.Run(":8080"); err != nil {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
@@ -190,10 +190,33 @@ func main() {
 	log.Println("Server shutdown complete")
 }
 
+// func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Conn, error) {
+// 	conn, err := kafka.DialLeader(context.Background(), "tcp", "kafka:9092", topic, partitions)
+// 	if err != nil {
+// 		fmt.Println("kafka error:", err)
+// 		panic(err.Error())
+// 	}
+
+//		log.Printf("Topic '%s' created successfully", topic)
+//		return conn, nil
+//	}
 func createTopic(topic string, partitions int, replicationFactor int) (*kafka.Conn, error) {
-	conn, err := kafka.DialLeader(context.Background(), "tcp", "localhost:9092", topic, partitions)
+	conn, err := kafka.Dial("tcp", "broker:9092")
 	if err != nil {
+		fmt.Println("kafka error:", err)
 		panic(err.Error())
+	}
+
+	topicConfig := kafka.TopicConfig{
+		Topic:             topic,
+		NumPartitions:     partitions,
+		ReplicationFactor: replicationFactor,
+	}
+
+	err = conn.CreateTopics(topicConfig)
+	if err != nil {
+		fmt.Println("Failed to create topic:", err)
+		return nil, err
 	}
 
 	log.Printf("Topic '%s' created successfully", topic)

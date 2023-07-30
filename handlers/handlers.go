@@ -86,7 +86,7 @@ func HandlePost(c *gin.Context, redisClient *redis.Client, psqlPool *pgxpool.Poo
 
 func postToKafka(post Post, topic string) error {
 	writer := &kafka.Writer{
-		Addr:     kafka.TCP("localhost:9092"),
+		Addr:     kafka.TCP("broker:9092"),
 		Topic:    topic,
 		Balancer: &kafka.LeastBytes{},
 	}
@@ -213,7 +213,7 @@ func ThrowUserIDExtractError(c *gin.Context) error {
 func readKafka(topic string, following map[int]int, conn *websocket.Conn, userID int, redisClient *redis.Client) {
 	stopChan := make(chan struct{})
 
-	brokers := []string{"localhost:9092"}
+	brokers := []string{"broker:9092"}
 	config := kafka.ReaderConfig{
 		Brokers:         brokers,
 		Topic:           topic,
@@ -364,7 +364,7 @@ func HandlerRemoveUserPostsFromFeed(c *gin.Context, cqlSession *gocql.Session, r
 func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Session, psqlPool *pgxpool.Pool) {
 	conn, err := psqlPool.Acquire(c)
 	if err != nil {
-		c.String(500, "Failed to acquire database connection")
+		c.String(500, "Failed to acquire database connection", err)
 		return
 	}
 	defer conn.Release()
