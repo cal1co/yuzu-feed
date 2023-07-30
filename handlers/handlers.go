@@ -37,6 +37,7 @@ type Post struct {
 	DisplayName      string     `json:"display_name"`
 	ProfileImageData string     `json:"profile_image_data"`
 	ProfileImage     string     `json:"profile_image"`
+	Media            []string   `json:"media"`
 }
 
 type PostUser struct {
@@ -119,6 +120,7 @@ func fanoutPost(post Post, redisClient *redis.Client, conn *pgxpool.Conn) error 
 	for i := 0; i < len(active); i++ {
 		addPostToRedisFeed(active[i], redisClient, post)
 	}
+	addPostToRedisFeed(post.UserID, redisClient, post)
 	return nil
 }
 
@@ -415,7 +417,6 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 	if err != nil {
 		fmt.Println(err)
 	}
-
 	for i := 0; i < len(postData); i++ {
 		_, ok := cachedUsers[postData[i].UserID]
 		if !ok {

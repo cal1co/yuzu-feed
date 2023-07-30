@@ -26,9 +26,9 @@ import (
 // TODO: Separate redis cache's for different services
 
 var (
-	kafkaBroker   = "localhost:9092"
+	// kafkaBroker   = "localhost:9092"
 	kafkaTopic    = "user_posts"
-	redisAddr     = "localhost:6379"
+	redisAddr     = "yuzu-feeds:6379"
 	redisPassword = ""
 	redisDB       = 0
 	kafkaWriter   *kafka.Writer
