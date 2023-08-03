@@ -398,7 +398,7 @@ func HandleFeed(c *gin.Context, redisClient *redis.Client, cqlSession *gocql.Ses
 	var posts []Post
 	cachedUsers := make(map[int]PostUser)
 
-	endpoint := fmt.Sprintf("http://localhost:8082/posts/feed/%d", uid)
+	endpoint := fmt.Sprintf("http://yuzu-post-handler:8080/posts/feed/%d", uid)
 	payload, err := json.Marshal(postIDs)
 	res, err := http.Post(endpoint, "application/json", bytes.NewBuffer(payload))
 	if err != nil {

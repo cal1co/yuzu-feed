@@ -147,7 +147,7 @@ func main() {
 	config := cors.DefaultConfig()
 	config.AllowMethods = []string{"GET", "POST", "DELETE", "OPTIONS"}
 	config.AddAllowHeaders("Authorization")
-	config.AllowOrigins = []string{"http://localhost:5173"}
+	config.AllowOrigins = []string{"*"}
 
 	r.Use(cors.New(config))
 	r.POST("/post", func(c *gin.Context) {

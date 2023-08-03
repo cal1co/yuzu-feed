@@ -10,4 +10,4 @@ RUN go build -o yuzu-feed-handler
 
 CMD ["./yuzu-feed-handler"]
 
-EXPOSE 8081
+EXPOSE 8080
